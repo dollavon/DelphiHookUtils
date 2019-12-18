@@ -119,24 +119,36 @@ type
 
 ////////////////////////////////////////////////////////////////////////////////
 //修改：Lsuper 2016.10.01
-//功能：引入 LDE64 长度反编译引擎
+//功能：引入 LDE64 长度反编译引擎 ShellCode
 //参数：
 ////////////////////////////////////////////////////////////////////////////////
-
+const
 {$IFDEF CPUX64}
-  {$L 'Win64\LDE64.o'}
-{$ELSE} {$IFDEF FPC}
-  {$L 'Win32\LDE64.o'}
+  {$I 'HookUtils.64.inc'}
 {$ELSE}
-  {$L 'Win32\LDE64.obj'}
-{$ENDIF} {$ENDIF}
+  {$I 'HookUtils.32.inc'}
+{$ENDIF}
 
 ////////////////////////////////////////////////////////////////////////////////
 //修改：Lsuper 2016.10.01
 //功能：LDE64 长度反编译引擎函数定义
 //参数：
+//注意：x64 下需要处理 DEP 问题
 ////////////////////////////////////////////////////////////////////////////////
-function LDE(lpData: Pointer; arch: LongWord): NativeUInt; stdcall; external;
+function LDE(lpData: Pointer; arch: LongWord): NativeUInt;
+var
+  D: Pointer;
+  F: LongWord;
+  M: TMemoryBasicInformation;
+  P: function (lpData: Pointer; arch: LongWord): NativeUInt; stdcall;
+begin
+  D := @defLde64ShellCode;
+  if VirtualQuery(D, M, SizeOf(M)) <> 0 then
+    if M.Protect <> PAGE_EXECUTE_WRITECOPY then
+      VirtualProtect(D, SizeOf(defLde64ShellCode), PAGE_EXECUTE_WRITECOPY, @F);
+  P := D;
+  Result := P(lpData, arch);
+end;
 
 ////////////////////////////////////////////////////////////////////////////////
 //修改：Lsuper 2016.10.01
@@ -242,6 +254,7 @@ end;
 //功能: 替换原有过程指针，并保留原有指针
 //参数：ATargetProc：被替换过程指针， NewProc：新的过程指针。
 //      OldProc: 被替换过程的备份过程指针（和原来的不是一个）
+//注意：对 Delphi 的 bpl 类函数需要 FixFunc 查找真正的函数地址
 //注意：需要判断是否 Win8 的 jmp xxx; int 3; ... 的特殊精简模式
 //注意：64 位中会有一种情况失败，就是 VirtualAlloc 不能在被Hook函数地址正负 2Gb
 //      范围内分配到内存。不过这个可能微乎其微，几乎不可能发生
@@ -252,15 +265,27 @@ function HookProc(ATargetProc, ANewProc: Pointer; out AOldProc: Pointer): Boolea
   type
     TJmpCode = packed record
       Code: Word;                 // 间接跳转指定，为 $25FF
-      Addr: ^Pointer;             // 跳转指针地址，指向保存目标地址的指针
+{$IFDEF CPUX64}
+      RelOffset: Int32;           // JMP QWORD PTR [RIP + RelOffset]
+{$ELSE}
+      Addr: PPointer;             // JMP DWORD PTR [JMPPtr] 跳转指针地址，指向保存目标地址的指针
+{$ENDIF}
     end;
     PJmpCode = ^TJmpCode;
   const
     csJmp32Code = $25FF;
+  var
+    P: PPointer;
   begin
     if PJmpCode(ATargetProc)^.Code = csJmp32Code then
     begin
-      ATargetProc := PJmpCode(ATargetProc)^.Addr^;
+{$IFDEF CPUX64}
+      P := Pointer(NativeUInt(ATargetProc) + PJmpCode(ATargetProc)^.RelOffset + SizeOf(TJmpCode));
+      ATargetProc := P^;
+{$ELSE}
+      P := PJmpCode(ATargetProc)^.Addr;
+      ATargetProc := P^;
+{$ENDIF}
       FixFunc();
     end;
   end;
@@ -352,7 +377,7 @@ var
   newProtected, oldProtected: DWORD;
 begin
   Result := False;
-  if (AOldProc = nil) then
+  if AOldProc = nil then
     Exit;
   backCodeSize := oldProc^.BackUpCodeSize;
   newProc := PNewProc(oldProc^.OldFuncAddr);
@@ -368,6 +393,7 @@ begin
   // 刷新处理器中的指令缓存，以免这部分指令被缓存执行的时候不一致
   FlushInstructionCache(GetCurrentProcess(), newProc, backCodeSize);
   AOldProc := nil;
+  Result := True;
 end;
 
 end.
